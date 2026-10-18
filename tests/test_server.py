@@ -67,3 +67,25 @@ def test_every_tool_ends_with_server_line(monkeypatch):
 
     for name, text in asyncio.run(run()).items():
         assert SERVER_LINE.search(text), f"{name} output has no server line:\n{text}"
+
+
+def test_parse_abilities_splits_comma_separated_ids():
+    # Shapes taken from the real /constants responses, including a key with two IDs.
+    ids = {
+        "5007": "axe_berserkers_call",
+        "3060,1617": "some_shared_ability",
+        "6145": "special_bonus_strength_15",
+        "bad,": "ignored_not_a_number",
+    }
+    details = {
+        "axe_berserkers_call": {"dname": "Berserker's Call"},
+        "special_bonus_strength_15": {"dname": "+15 Strength"},
+    }
+    names, talents = server.parse_abilities(ids, details)
+    assert names == {
+        5007: "Berserker's Call",
+        3060: "some_shared_ability",  # no display name: falls back to the internal name
+        1617: "some_shared_ability",
+        6145: "+15 Strength",
+    }
+    assert talents == {6145}

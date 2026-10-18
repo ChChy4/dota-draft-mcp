@@ -121,19 +121,22 @@ def get_abilities() -> tuple[dict[int, str], set[int]]:
     with _ability_lock:
         if _abilities is None:
             log.info("Fetching ability constants from OpenDota")
-            ids = client.get("/constants/ability_ids")
-            details = client.get("/constants/abilities")
-            names: dict[int, str] = {}
-            talents: set[int] = set()
-            # Some keys hold several IDs for one ability, e.g. "3060,1617".
-            for key, internal in ids.items():
-                for part in key.split(","):
-                    if part.strip().isdigit():
-                        names[int(part)] = (details.get(internal) or {}).get("dname") or internal
-                        if internal.startswith("special_bonus_"):
-                            talents.add(int(part))
-            _abilities = (names, talents)
+            _abilities = parse_abilities(client.get("/constants/ability_ids"), client.get("/constants/abilities"))
         return _abilities
+
+
+def parse_abilities(ids: dict[str, str], details: dict[str, dict]) -> tuple[dict[int, str], set[int]]:
+    """Ability ID -> display name, and talent IDs, from /constants/ability_ids and /constants/abilities."""
+    names: dict[int, str] = {}
+    talents: set[int] = set()
+    # Some keys hold several IDs for one ability, e.g. "3060,1617".
+    for key, internal in ids.items():
+        for part in key.split(","):
+            if part.strip().isdigit():
+                names[int(part)] = (details.get(internal) or {}).get("dname") or internal
+                if internal.startswith("special_bonus_"):
+                    talents.add(int(part))
+    return names, talents
 
 
 def fetch_skill_rows(data: store.MatchupData, hero_id: int, days: int, now: float) -> list[tuple[int, list[int]]]:
