@@ -9,3 +9,6 @@ __pycache__/
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Log written by tools/install-desktop-config.ps1
+tools/install-desktop-config.log

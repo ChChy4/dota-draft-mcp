@@ -78,6 +78,24 @@ already in the file, then restart Claude Desktop:
 Use full paths: Claude Desktop does not start the server in the project folder, and its PATH may
 not include uv. Find uv's path with `where uv` (Windows) or `which uv` (macOS/Linux).
 
+**Edit the file only while Claude Desktop is closed.** While it runs, the app rewrites the config
+from its own copy in memory, so an edit made while it is open is lost.
+
+On Windows, [`tools/install-desktop-config.ps1`](tools/install-desktop-config.ps1) does this for
+you. Start it, then quit Claude Desktop completely (including the tray icon) and wait about 10
+seconds before reopening it:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\install-desktop-config.ps1
+```
+
+The script waits until Claude Desktop has quit (up to 2 hours), backs up the config next to the
+original, adds `mcpServers.dota-draft` with the full paths to uv and this project while keeping
+every other key, checks that the result is valid JSON with all other keys unchanged (restoring
+the backup if not), and logs each step to `tools/install-desktop-config.log`. Its default config
+path is for the Microsoft Store app on this machine (`Claude_pzs8sxrjxfjjc`); pass `-ConfigPath`
+for another install, and `-UvPath` if uv is not on PATH.
+
 ## The tools
 
 | Tool | Use it for | Data |
