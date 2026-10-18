@@ -5,6 +5,7 @@ import threading
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastmcp import FastMCP
 
@@ -23,6 +24,36 @@ _item_names: dict[int, str] | None = None
 _item_lock = threading.Lock()
 _abilities: tuple[dict[int, str], set[int]] | None = None
 _ability_lock = threading.Lock()
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def read_git_commit(root: Path) -> str:
+    """Short hash of the commit checked out in root, read from .git without running git."""
+    git = root / ".git"
+    try:
+        head = (git / "HEAD").read_text(encoding="utf-8").strip()
+        if not head.startswith("ref: "):
+            return head[:7]  # detached HEAD holds the hash itself
+        ref = head.removeprefix("ref: ")
+        if (git / ref).is_file():
+            return (git / ref).read_text(encoding="utf-8").strip()[:7]
+        for line in (git / "packed-refs").read_text(encoding="utf-8").splitlines():
+            if line.endswith(" " + ref):
+                return line.split(" ", 1)[0][:7]
+    except OSError:
+        pass
+    return "unknown"
+
+
+# Fixed when the server starts: code changed later is not used until the server restarts.
+STARTED_AT = datetime.now(timezone.utc)
+STARTED_COMMIT = read_git_commit(PROJECT_ROOT)
+
+
+def with_server_line(text: str) -> str:
+    started = STARTED_AT.strftime("%Y-%m-%d %H:%M UTC")
+    return f"{text}\nServer: started {started} from commit {STARTED_COMMIT}."
 
 
 def get_hero_list() -> HeroList:
@@ -61,6 +92,10 @@ def find_hero(name: str) -> str:
     names ("furion") and misspellings ("invokr"). If several heroes match, it lists them so
     you can ask the user which one they meant.
     """
+    return with_server_line(_find_hero(name))
+
+
+def _find_hero(name: str) -> str:
     try:
         heroes = get_hero_list()
     except OpenDotaError as exc:
@@ -158,6 +193,10 @@ def suggest_heroes(allies: list[int], enemies: list[int], position: int) -> str:
     enemies, with roles, per-enemy advantages and sample sizes. The data has no positions, so
     choose the best 5 for the user's position from the roles and your Dota knowledge.
     """
+    return with_server_line(_suggest_heroes(allies, enemies, position))
+
+
+def _suggest_heroes(allies: list[int], enemies: list[int], position: int) -> str:
     if position not in draft.POSITIONS:
         return "position must be 1 (safe lane carry), 2 (mid), 3 (offlane), 4 (soft support) or 5 (hard support)."
     try:
@@ -186,6 +225,10 @@ def lane_info(my_hero: int, enemy_laners: list[int]) -> str:
     Base all skill advice on the skill data this tool returns. Do not suggest skill builds from
     memory that the data contradicts; if it says there is not enough data, say so.
     """
+    return with_server_line(_lane_info(my_hero, enemy_laners))
+
+
+def _lane_info(my_hero: int, enemy_laners: list[int]) -> str:
     try:
         data = store.load()
     except store.DataMissing as exc:
