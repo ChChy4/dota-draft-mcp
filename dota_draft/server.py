@@ -2,9 +2,12 @@
 
 import logging
 import threading
+from collections.abc import Callable
+from datetime import datetime, timezone
 
 from fastmcp import FastMCP
 
+from dota_draft import draft, store
 from dota_draft.heroes import HeroList
 from dota_draft.opendota import OpenDotaClient, OpenDotaError, setup_logging
 
@@ -15,6 +18,8 @@ client = OpenDotaClient()
 
 _hero_list: HeroList | None = None
 _hero_lock = threading.Lock()
+_item_names: dict[int, str] | None = None
+_item_lock = threading.Lock()
 
 
 def get_hero_list() -> HeroList:
@@ -59,6 +64,86 @@ def find_hero(name: str) -> str:
         log.error("Hero list unavailable: %s", exc)
         return f"Could not fetch the hero list from OpenDota: {exc}"
     return format_find_hero(name, heroes)
+
+
+def get_item_names() -> dict[int, str]:
+    """Item ID -> display name from /constants/items, fetched once per server session."""
+    global _item_names
+    with _item_lock:
+        if _item_names is None:
+            log.info("Fetching item constants from OpenDota")
+            items = client.get("/constants/items")
+            _item_names = {int(v["id"]): v.get("dname") or key for key, v in items.items() if "id" in v}
+        return _item_names
+
+
+def hero_labels() -> tuple[Callable[[int], str], Callable[[int], str], str]:
+    """Name and roles lookups from the hero list, plus a note on where they came from."""
+    try:
+        heroes = get_hero_list()
+    except OpenDotaError as exc:
+        log.error("Hero list unavailable: %s", exc)
+        return (lambda i: f"hero {i}"), (lambda i: "unknown"), "Hero names and roles unavailable (OpenDota unreachable)."
+    by_id = {h.id: h for h in heroes.heroes}
+    name = lambda i: by_id[i].name if i in by_id else f"hero {i}"
+    roles = lambda i: ", ".join(by_id[i].roles) if i in by_id and by_id[i].roles else "unknown"
+    stamp = heroes.fetched_at.strftime("%Y-%m-%d %H:%M UTC")
+    return name, roles, f"Hero names and roles: fetched live from OpenDota /heroes at {stamp}."
+
+
+@mcp.tool
+def suggest_heroes(allies: list[int], enemies: list[int], position: int) -> str:
+    """Suggest heroes for the user's pick in a Dota 2 draft, from Divine/Immortal ranked matchup data.
+
+    Use this during a draft once you know the hero IDs (get them with find_hero). Pass the
+    allied heroes already picked (0-4, not counting the user), the enemy heroes picked so far
+    (0-5) and the user's position (1 = safe lane carry, 2 = mid, 3 = offlane, 4 = soft support,
+    5 = hard support). Returns the top 20 unpicked heroes by average advantage against the
+    enemies, with roles, per-enemy advantages and sample sizes. The data has no positions, so
+    choose the best 5 for the user's position from the roles and your Dota knowledge.
+    """
+    if position not in draft.POSITIONS:
+        return "position must be 1 (safe lane carry), 2 (mid), 3 (offlane), 4 (soft support) or 5 (hard support)."
+    try:
+        data = store.load()
+    except store.DataMissing as exc:
+        return str(exc)
+    error = draft.check_heroes(data, {"allies": allies, "enemies": enemies}, {"allies": (0, 4), "enemies": (0, 5)})
+    if error:
+        return error
+    name, roles, hero_note = hero_labels()
+    text = draft.format_suggestions(data, draft.suggest(data, allies, enemies), allies, enemies, position, name, roles)
+    return f"{text}\n{hero_note}"
+
+
+@mcp.tool
+def lane_info(my_hero: int, enemy_laners: list[int]) -> str:
+    """Lane matchup info for the user's hero against the enemy heroes in their lane.
+
+    Use this after the draft (or once the lanes are clear) to plan the laning phase. Pass the
+    user's hero ID and the IDs of the 1-3 enemy heroes they will lane against (get IDs with
+    find_hero). Returns games, wins, smoothed win rate and advantage against each enemy from
+    Divine/Immortal ranked data, plus popular starting and early items for the user's hero
+    (items come from pro games).
+    """
+    try:
+        data = store.load()
+    except store.DataMissing as exc:
+        return str(exc)
+    error = draft.check_heroes(data, {"my_hero": [my_hero], "enemy_laners": enemy_laners}, {"my_hero": (1, 1), "enemy_laners": (1, 3)})
+    if error:
+        return error
+    name, _, hero_note = hero_labels()
+    try:
+        popularity = client.get(f"/heroes/{my_hero}/itemPopularity")
+        item_lines = draft.format_items(popularity, get_item_names())
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        item_note = f"Items: fetched live from OpenDota at {stamp}."
+    except OpenDotaError as exc:
+        log.error("Items unavailable: %s", exc)
+        item_lines, item_note = None, "Items: OpenDota could not be reached, so items are missing."
+    text = draft.format_lane(data, my_hero, enemy_laners, name, item_lines, item_note)
+    return f"{text}\n{hero_note}"
 
 
 def main() -> None:
