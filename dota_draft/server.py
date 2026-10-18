@@ -9,7 +9,7 @@ from pathlib import Path
 
 from fastmcp import FastMCP
 
-from dota_draft import draft, store
+from dota_draft import draft, screenshot, store
 from dota_draft.heroes import HeroList
 from dota_draft.opendota import OpenDotaClient, OpenDotaError, setup_logging
 
@@ -24,6 +24,10 @@ _item_names: dict[int, str] | None = None
 _item_lock = threading.Lock()
 _abilities: tuple[dict[int, str], set[int]] | None = None
 _ability_lock = threading.Lock()
+_matcher: tuple[tuple[int, float], screenshot.Matcher] | None = None
+_matcher_lock = threading.Lock()
+
+BRIEF_ANSWER = "During a draft, answer briefly: the top 3 heroes for position {position}, one line each."
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -253,8 +257,77 @@ def _lane_info(my_hero: int, enemy_laners: list[int]) -> str:
     return f"{text}\n{hero_note}"
 
 
+def get_matcher() -> screenshot.Matcher:
+    """Portrait matching tables, built once (about 2 s) and rebuilt when the collector adds portraits."""
+    global _matcher
+    folder = screenshot.PORTRAITS_DIR
+    with _matcher_lock:
+        files = list(folder.glob("*.png"))
+        key = (len(files), max((f.stat().st_mtime for f in files), default=0.0))
+        if _matcher is None or _matcher[0] != key:
+            start = time.perf_counter()
+            _matcher = (key, screenshot.Matcher(*screenshot.load_portraits(folder)))
+            log.info("Built portrait matcher in %.2f s", time.perf_counter() - start)
+        return _matcher[1]
+
+
+def warm_up() -> None:
+    """Prepare what draft_from_screenshot needs (matcher, matchup data, hero list) in the background."""
+    for step in (get_matcher, store.load, get_hero_list):
+        try:
+            step()
+        except (screenshot.ScreenshotError, store.DataMissing, OpenDotaError) as exc:
+            log.warning("Warm-up step %s skipped: %s", step.__name__, exc)
+
+
+@mcp.tool
+def draft_from_screenshot(position: int) -> str:
+    """Read the current Dota 2 draft from the newest Steam screenshot (F12) and suggest heroes.
+
+    Use this during a draft when the user says they pressed F12 or took a screenshot, or asks
+    for picks without listing the heroes. Pass the user's position (1 = safe lane carry,
+    2 = mid, 3 = offlane, 4 = soft support, 5 = hard support). It reads the newest screenshot
+    (refusing ones older than 3 minutes), finds the picked heroes and the user's side, and
+    returns the detected draft followed by suggest_heroes output for it. During a draft,
+    answer briefly: the top 3 heroes for the user's position, one line each.
+    """
+    return with_server_line(_draft_from_screenshot(position))
+
+
+def _draft_from_screenshot(position: int) -> str:
+    if position not in draft.POSITIONS:
+        return "position must be 1 (safe lane carry), 2 (mid), 3 (offlane), 4 (soft support) or 5 (hard support)."
+    start = time.perf_counter()
+    try:
+        path = screenshot.newest_screenshot(screenshot.screenshot_folders())
+        age = time.time() - path.stat().st_mtime
+        if age > screenshot.MAX_AGE_S:
+            return (
+                f"The newest screenshot ({path.name}) is {age / 60:.0f} minutes old, so it was not used. "
+                "Ask the user to press F12 in the draft and try again."
+            )
+        screen = screenshot.load_screen(path)
+        matcher = get_matcher()
+    except screenshot.ScreenshotError as exc:
+        return str(exc)
+    reading = screenshot.read_draft(screen, matcher)
+    name, _, _ = hero_labels()
+    lines = [BRIEF_ANSWER.format(position=position), "", *screenshot.format_reading(reading, path, age, name), ""]
+    for side in [reading.side] if reading.side else list(screenshot.SIDES):
+        other = "Dire" if side == "Radiant" else "Radiant"
+        allies = [s.hero_id for s in reading.picked(side) if reading.own != (side, s.number)]
+        enemies = [s.hero_id for s in reading.picked(other)]
+        if not reading.side:
+            lines.append(f"--- If you are {side}:")
+        lines += [_suggest_heroes(allies, enemies, position), ""]
+    log.info("Read %s in %.2f s (matching %.2f s)", path.name, time.perf_counter() - start, reading.timings["match_s"])
+    return "\n".join(lines).rstrip()
+
+
 def main() -> None:
     setup_logging()
+    # Prepare in the background so the first draft_from_screenshot call is fast.
+    threading.Thread(target=warm_up, daemon=True).start()
     mcp.run(transport="stdio", show_banner=False)
 
 

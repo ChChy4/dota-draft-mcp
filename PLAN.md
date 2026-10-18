@@ -3,7 +3,7 @@
 Approved plan for a local MCP server that helps draft in Dota 2 at Divine/Immortal level,
 using matchup data from OpenDota's `public_matches` table.
 
-**Status (October 2026):** all phases built, tested and pushed. This file describes the server
+**Status (October 2026):** Phases 0–6 built, tested and pushed. This file describes the server
 as built, including the changes made during the build (marked "changed during the build").
 
 ## Goal
@@ -158,21 +158,27 @@ README.md               setup, collecting data, connecting to Claude, tools, lim
 pyproject.toml          uv project (scripts: dota-draft-server, dota-draft-collect)
 uv.lock
 .mcp.json               Claude Code project server config
-.gitignore              ignores data/, .venv/, caches, .claude/settings.local.json
+.gitignore              ignores data/, .venv/, caches, .claude/settings.local.json, tools log, scratch/
+tools/
+  install-desktop-config.ps1  adds the server to Claude Desktop's config after the app quits
 dota_draft/
   __init__.py
   opendota.py           shared API client: request pacing, retries, explorer queries, stderr logging
   heroes.py             hero list and name matching (Tool 1 logic)
   store.py              reads aggregate.json, data age, match ID estimates
   draft.py              scoring (Tool 2), lane info and skill builds (Tool 3)
-  server.py             FastMCP server with the 3 tools and the Server line
-  collect.py            the data collection command
+  screenshot.py         reading a draft from a Steam screenshot (Tool 4 logic)
+  server.py             FastMCP server with the 4 tools and the Server line
+  collect.py            the data collection command (matchups and reference portraits)
 tests/
   test_heroes.py        name matching
-  test_collect.py       pairs, splitting, window, deletion, refetching
+  test_collect.py       pairs, splitting, window, deletion, refetching, portrait download
   test_draft.py         scoring, lane info, skill builds (hand-checkable data)
+  test_screenshot.py    slot reading, own slot and side, screenshot checks (synthetic images)
+  synthetic.py          builds synthetic screenshots and portraits for tests
   test_server.py        Server line, commit reading, ability ID parsing, every tool via MCP
-data/                   created by the collector, not committed
+data/                   created by the collector, not committed (includes data/portraits/)
+scratch/                local experiments, not committed
 ```
 
 ## Build order
@@ -236,6 +242,138 @@ old server (started between the Phase 3 and Phase 4 commits) showed no expected 
   tree; the Desktop config validated and its command started from outside the project.
 - Update this plan with the changes made during the build.
 - Commit: "Phase 5: README and end-to-end checks".
+
+### Phase 6 — draft from a Steam screenshot ✔ (approved and built; see "Built" at the end)
+
+**Why.** Typing heroes is too slow in a ranked pick. The prototype in `scratch/` (October 2026)
+read 51 of 55 picked portraits on 18 screenshots at 1920×1080, with no wrong heroes, in about
+2 s per screenshot (C#/PowerShell, unoptimised); the user's own slot was found by name
+brightness on one screenshot per side.
+
+**New tool `draft_from_screenshot(position)`.** In one call:
+
+1. **Find the newest screenshot.** Default: the newest `.jpg` in any
+   `<Steam>\userdata\*\760\remote\570\screenshots` folder (Steam path from the registry key
+   `HKCU\Software\Valve\Steam\SteamPath`). Override with the environment variable
+   `DOTA_SCREENSHOT_DIR` (set in the MCP config `env`, not committed, because the path is
+   personal). Only `.jpg` files Steam writes; nothing else on disk is read.
+2. **Refuse old screenshots.** If its file time is more than 3 minutes old, return its age and
+   ask for a fresh F12, so an old draft is never used.
+3. **Refuse other screen sizes.** Only 1920×1080 was measured; anything else returns a clear
+   message instead of guessing slot positions.
+4. **Read the 10 top-bar slots** (left x = 210, 335, 460, 585, 710; right x = 1095 … 1595;
+   match area slot x+28…+88, y 6…38), as in the prototype:
+   - for each slot, the best reference portrait over a small search (portrait origin slot x−12…+4,
+     y 2…8, scale 0.42…0.50);
+   - **picked** if the best hero beats the second best by ≥ 15 (measured: picks 22.7–39.5,
+     everything else ≤ 4.5);
+   - otherwise **unknown portrait** if the slot is colourful (saturation ≥ 40: the 4 unmatched
+     portraits measured 45–99, empty and greyed-out slots ≤ 33), else **empty / not locked in**.
+5. **Find my slot and side.** My name is drawn brighter: the 90th-percentile brightness of the
+   name text (y 82…100 under each slot) was 225 and 243 for my name and 162–166 for the other
+   nine. Rule: the brightest slot if it is ≥ 200 and at least 30 above the next. Second check:
+   my team is green on the map (hero-pick minimap x 105…435, y 875…1055; strategy-phase map
+   x 850…1125, y 207…483): green bottom-left = Radiant, green top-right = Dire.
+   - Both cues agree, or only one gives an answer → use it, and say which cue decided.
+   - They disagree, or neither gives an answer → **return both readings** (as Radiant and as Dire,
+     each with its suggestions) and say the side could not be determined.
+6. **Return**
+   - the detected draft: my slot (side and number, and my hero if already picked), allies,
+     enemies, unknown slots, empty slots, and the screenshot's file name and age;
+   - then exactly what `suggest_heroes(allies, enemies, position)` returns for that draft
+     (allies = picked heroes on my side except my own slot);
+   - a line telling Claude: during a draft, answer briefly — the top 3 heroes for my position,
+     one line each;
+   - the Server line, like every tool.
+   - Other players' names are never returned or logged; only slot numbers.
+
+**Reference portraits.** The collector downloads `/constants/heroes` (one OpenDota request) and the
+127 portrait images from Valve's CDN into `data/portraits/<hero id>.png` with a small
+`data/portraits/manifest.json` (source URL, download time). Only missing portraits are fetched;
+a new hero is picked up on the next run. The server only reads them and builds its matching
+tables in memory on the first call (target: under 1 s, measured in 6c).
+
+**Python port.** The matcher moves to Python with **Pillow** (JPEG/PNG decoding) and **numpy**
+(vectorised comparison). These are **two new dependencies** and need approval. Plan for speed:
+all candidate portrait patches (127 heroes × 5 scales × 9 × 4 positions, sampled every 2nd
+pixel ≈ 33 MB) are prepared once; each slot is then one vectorised comparison. Target: reading a
+screenshot (find + load + 10 slots + side) **under 3 s**, measured, not assumed.
+
+**Files**
+
+| File | Change |
+|---|---|
+| `pyproject.toml`, `uv.lock` | add `pillow`, `numpy` |
+| `dota_draft/collect.py` | download reference portraits into `data/portraits/` |
+| `dota_draft/screenshot.py` | **new**: find newest screenshot, age and size checks, slot matching, own slot and side, the detected-draft text |
+| `dota_draft/server.py` | new tool `draft_from_screenshot(position)` reusing the `suggest_heroes` code path |
+| `tests/test_screenshot.py` | **new**: synthetic images only (see below) |
+| `tests/test_collect.py` | portrait download: only missing files fetched, written inside `data/` |
+| `tests/test_server.py` | the new tool is included in the "every tool has the Server line" test |
+| `README.md`, `PLAN.md` | the tool, the screenshot folder setting, limitations |
+
+**Build order** (each step ends with its tests passing; one commit and push at the end of the
+phase, "Phase 6: draft from a Steam screenshot")
+
+- **6a.** Add Pillow and numpy (after approval).
+- **6b.** Collector downloads portraits. Test: unit tests with a fake downloader; a real run
+  fetches 127 files, a second run fetches 0.
+- **6c.** `screenshot.py`: port and vectorise the matcher, own-slot and side detection. Tests on
+  synthetic images. Then a **local accuracy and speed check** against the 18 draft screenshots in
+  the Steam folder (not committed): expect 51 of 55 picks, 0 wrong heroes, my slot found on the two
+  screenshots where it is known, and the measured time per screenshot.
+- **6d.** The tool in `server.py`. Tests through the in-memory MCP client with a temporary
+  screenshot folder holding synthetic images: fresh vs. too old, wrong size, picks, unknown slot,
+  side found, side not found (both readings), the brief-answer line, the Server line.
+- **6e.** README and PLAN; end to end: restart Claude, take an F12 in a practice game with bots,
+  call the tool from Claude Code and Claude Desktop, time it.
+
+**Testing without screenshots in the repo.** Full screenshots show other players' names and are
+never committed. Tests build a synthetic 1920×1080 image: generated "portraits" (patterned noise,
+not game art) placed into slots at the measured scale and offsets, grey boxes for empty slots,
+desaturated copies for not-locked-in heroes, a bright and dim text-like bar for names, and green
+and red blobs for the map. The real-screenshot check in 6c runs locally only.
+
+**Risks**
+
+- **One resolution, one language.** Only 1920×1080 and Russian-language screens were measured.
+  Other sizes are refused; another language or UI scale could move the name text.
+- **Own-slot detection rests on two screenshots** (one per side). Very short names or other
+  scripts may measure differently; the map check and "both readings" are the fallback.
+- **Portrait art changes** (Valve updates, personas, cosmetics) give "unknown", as for 4 old
+  portraits. New heroes appear only after the collector has downloaded their portrait.
+- **Not-locked-in heroes are ignored** — an F12 taken while someone is still hovering misses them.
+- **Speed is unknown in Python** until 6c measures it; the 3 s target may need a coarser search.
+- **Wrong screenshot.** With several Steam accounts, the newest file across all accounts is used;
+  an in-game F12 taken after the draft would be read as a draft (expected result: no picks and no
+  own slot, reported as "not a draft screenshot?" — to be checked in 6c on in-game screenshots).
+- **Privacy.** The tool reads screenshots that contain other players' names; it never returns,
+  logs or stores them.
+
+**Built (changed during the build in italics where it differs from the proposal)**
+
+- **6a.** Pillow 13.0.0 and numpy 2.5.4. *Running servers keep `dota-draft-server.exe` open, so
+  `uv add` could not reinstall the project; the dependencies were recorded with
+  `uv add --no-sync` and installed with `uv sync --inexact --no-install-project`. The failed first
+  attempt had already removed `dota-draft-collect.exe`; it comes back with the next `uv sync` run
+  while no server is running.*
+- **6b.** First real run fetched 127 portraits (8.3 MB); the second fetched 0.
+- **6c.** `screenshot.py` reproduces the prototype on all 180 slots of the 18 draft screenshots
+  (57 picked, 6 unknown, 117 empty; 0 differences) in 0.54–0.63 s per screenshot (load + read).
+  Building the matching tables takes about 1.5 s and loading the portraits about 0.9 s, once.
+  *Map rule tightened:* during picking the strategy-map area covers the hero grid and showed red
+  only (up to 374 pixels), so a side now needs at least 50 green pixels in one corner **and** 50
+  red in the opposite one. *Not-a-draft warning:* on 77 in-game screenshots no slot was read as
+  picked, but 13 had bright text where the names would be, so the warning ("no picked heroes
+  found") now depends only on there being no picks. On 3 Captains Mode screenshots the name and
+  map cues disagree; the tool gives both readings there.
+- **6d.** `draft_from_screenshot` in `server.py`. *Added a background warm-up when the server
+  starts* (matcher, matchup data, hero list), because the first call right after start took
+  3.01 s without it. Measured over stdio on a fresh copy of the newest real screenshot: first
+  call 2.70 s right after start, 1.10 s 10 s after start, then about 0.6 s.
+- **Tests.** 83 unit tests, the new ones on synthetic images only (`tests/synthetic.py`,
+  `tests/test_screenshot.py`, `tests/test_server.py`). The real-screenshot checks are scripts in
+  `scratch/` and are not committed.
 
 ## Risks
 

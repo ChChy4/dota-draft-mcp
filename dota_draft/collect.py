@@ -3,7 +3,8 @@
 Match IDs are split into fixed ranges ("slices"). Each slice is fetched once from the OpenDota
 explorer and saved as data/slices/<first match id>.json. A run walks backward from the newest
 match until it leaves the 30-day window, fetching only the slices that are missing, then
-deletes slices outside the window and rebuilds data/aggregate.json from the rest.
+deletes slices outside the window and rebuilds data/aggregate.json from the rest. It also
+downloads any missing reference hero portraits into data/portraits/ for reading screenshots.
 """
 
 import json
@@ -16,11 +17,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+import httpx
+
 from dota_draft.opendota import OpenDotaClient, OpenDotaError, QueryTimeout, setup_logging
 
 log = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+PORTRAITS_DIR_NAME = "portraits"  # reference hero portraits for reading screenshots
+PORTRAIT_CDN = "https://cdn.cloudflare.steamstatic.com"
 
 SLICE_SIZE = 1_000_000  # match IDs per slice, about 16 hours of matches
 WINDOW_DAYS = 30
@@ -116,15 +121,49 @@ def fetch_split(query: Callable[[int, int], Any], merge: Callable[[Any, Any], An
         return merge(fetch_split(query, merge, lo, mid, depth + 1), fetch_split(query, merge, mid, hi, depth + 1))
 
 
-def write_json(path: Path, data: Any, data_dir: Path) -> None:
+def write_bytes(path: Path, content: bytes, data_dir: Path) -> None:
     """Write through a temporary file and rename, only inside data_dir."""
     path = path.resolve()
     if not path.is_relative_to(data_dir.resolve()):
         raise ValueError(f"refusing to write outside {data_dir}: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
+    tmp.write_bytes(content)
     os.replace(tmp, path)
+
+
+def write_json(path: Path, data: Any, data_dir: Path) -> None:
+    write_bytes(path, json.dumps(data, separators=(",", ":")).encode("utf-8"), data_dir)
+
+
+def download(url: str) -> bytes:
+    response = httpx.get(url, timeout=30, follow_redirects=True)
+    response.raise_for_status()
+    return response.content
+
+
+def collect_portraits(client: OpenDotaClient, data_dir: Path, fetch: Callable[[str], bytes] = download,
+                      now: float | None = None) -> int:
+    """Download missing reference hero portraits into data_dir/portraits; return how many were fetched."""
+    now = time.time() if now is None else now
+    stamp = datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds")
+    folder = data_dir / PORTRAITS_DIR_NAME
+    manifest_path = folder / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.is_file() else {"heroes": {}}
+    fetched = 0
+    for hero in client.get("/constants/heroes").values():
+        hero_id = int(hero["id"])
+        path = folder / f"{hero_id}.png"
+        if path.is_file():
+            continue
+        url = PORTRAIT_CDN + hero["img"].split("?")[0]
+        write_bytes(path, fetch(url), data_dir)
+        manifest["heroes"][str(hero_id)] = {"name": hero["localized_name"], "url": url, "downloaded_at": stamp}
+        fetched += 1
+    manifest["updated_at"] = stamp
+    write_json(manifest_path, manifest, data_dir)
+    log.info("Portraits: fetched %d new, %d in %s", fetched, len(list(folder.glob("*.png"))), folder)
+    return fetched
 
 
 def load_slices(slices_dir: Path) -> dict[int, dict[str, Any]]:
@@ -232,9 +271,15 @@ def collect(source: Any, data_dir: Path, now: float | None = None, slice_size: i
 
 def main() -> None:
     setup_logging()
-    source = ExplorerSource(OpenDotaClient(timeout_s=60))
+    client = OpenDotaClient(timeout_s=60)
+    source = ExplorerSource(client)
     complete = collect(source, DATA_DIR)
     log.info("Requests this run: %d", source.requests)
+    try:
+        collect_portraits(client, DATA_DIR)
+    except (OpenDotaError, httpx.HTTPError, KeyError, ValueError) as exc:
+        complete = False
+        log.error("Portrait download stopped early: %s", exc)
     sys.exit(0 if complete else 1)
 
 

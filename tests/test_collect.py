@@ -5,6 +5,7 @@ import pytest
 from dota_draft.collect import (
     MATCH_FILTER,
     build_aggregate,
+    collect_portraits,
     collect,
     fetch_split,
     merge_pairs,
@@ -162,3 +163,40 @@ def test_collect_reports_early_stop_and_still_writes_aggregate(tmp_path):
     data_dir = tmp_path / "data"
     assert not collect(FakeSource(fail_pairs=True), data_dir, now=NOW, slice_size=100)
     assert read_aggregate(data_dir)["slices"] == 0
+
+
+class FakeHeroClient:
+    def __init__(self, heroes):
+        self.heroes = heroes
+
+    def get(self, path):
+        assert path == "/constants/heroes"
+        return {str(h["id"]): h for h in self.heroes}
+
+
+def hero(hero_id, name):
+    return {"id": hero_id, "localized_name": name, "img": f"/apps/dota2/images/dota_react/heroes/{name.lower()}.png?"}
+
+
+def test_collect_portraits_fetches_only_missing(tmp_path):
+    data_dir = tmp_path / "data"
+    fetched_urls = []
+
+    def fetch(url):
+        fetched_urls.append(url)
+        return b"png-bytes"
+
+    client = FakeHeroClient([hero(1, "Axe"), hero(2, "Lina")])
+    assert collect_portraits(client, data_dir, fetch, now=NOW) == 2
+    assert fetched_urls == [
+        "https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/heroes/axe.png",
+        "https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/heroes/lina.png",
+    ]
+    assert (data_dir / "portraits" / "1.png").read_bytes() == b"png-bytes"
+    manifest = json.loads((data_dir / "portraits" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["heroes"]["2"]["name"] == "Lina"
+
+    assert collect_portraits(client, data_dir, fetch, now=NOW) == 0  # nothing missing
+    client.heroes.append(hero(3, "Kez"))  # a new hero appears
+    assert collect_portraits(client, data_dir, fetch, now=NOW) == 1
+    assert fetched_urls[-1].endswith("/kez.png")

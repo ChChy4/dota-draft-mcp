@@ -7,6 +7,8 @@ data to suggest heroes and plan your lane.
 - **Matchups** come from about 1.7 million Divine/Immortal ranked All Pick matches over the last
   30 days, collected from OpenDota and stored on your computer, so draft answers are instant.
 - **Items and skill builds** come live from OpenDota's pro (league) matches.
+- **No typing during a ranked pick:** press F12 in the draft and Claude reads the picks from the
+  Steam screenshot.
 
 Built with Python, [FastMCP](https://gofastmcp.com) and [uv](https://docs.astral.sh/uv/). Runs
 locally over stdio. No API key needed.
@@ -46,6 +48,10 @@ deletes slices older than 30 days.
 Run it before you play, ideally once a day, so the data stays within the last 30 days. Every
 tool says how old the data is. The collector stays within OpenDota's free limits (60 requests
 per minute, 3,000 per day) and stops after 300 requests in one run.
+
+It also downloads the reference hero portraits used to read screenshots (127 images, about
+8 MB, from Valve's CDN) into `data/portraits/`. Only missing portraits are fetched, so a new hero
+is added on the next run.
 
 ## Connect to Claude
 
@@ -103,6 +109,7 @@ for another install, and `-UvPath` if uv is not on PATH.
 | `find_hero(name)` | Turn a hero name into its ID. Accepts full names, short names (`am`, `qop`, `jugg`, `es`), internal names (`furion`) and typos (`invokr`); lists all matches when a name is ambiguous (`ss`). | Live hero list from OpenDota |
 | `suggest_heroes(allies, enemies, position)` | The top 20 heroes for your pick: roles, score, expected win rate in this draft, the advantage against each enemy, and sample sizes. | Local Divine/Immortal data |
 | `lane_info(my_hero, enemy_laners)` | Your hero against each enemy laner, popular starting and early items, and skill builds (level 1 skill, skill maxed first, most common orders for levels 1–6). | Local data + live pro items and skills |
+| `draft_from_screenshot(position)` | Reads the draft from your newest F12 screenshot (your slot and side, allies, enemies, unknown slots), then gives the same suggestions as `suggest_heroes`. | Your Steam screenshot + local data |
 
 **How the score works.** For each enemy: the hero's win rate against that enemy, smoothed by
 adding 50 games at the hero's own win rate, minus the hero's overall win rate. The score is the
@@ -116,10 +123,37 @@ is not enough data. The tool tells Claude to base skill advice on this data and 
 Every tool's output ends with lines saying how old its data is and which commit the server
 started from.
 
+## Reading the draft from a screenshot
+
+1. In the draft, press **F12** (Steam's screenshot key).
+2. Ask Claude something like "I'm offlane, read the draft". It calls
+   `draft_from_screenshot(position)` and answers briefly with the top 3 heroes for your position.
+
+How it works:
+
+- It reads the **newest** `.jpg` in your Steam Dota 2 screenshot folders
+  (`<Steam>\userdata\<account>\760\remote\570\screenshots`, all accounts). To use one folder
+  only, set `DOTA_SCREENSHOT_DIR` in the server's `env` in `.mcp.json` or
+  `claude_desktop_config.json`.
+- It **refuses screenshots older than 3 minutes**, so an old draft is never used, and
+  screenshots that are not **1920×1080**.
+- It compares the 10 hero portraits in the top bar (Radiant left, Dire right) with the reference
+  portraits. A slot counts as picked only when one hero matches far better than all others;
+  otherwise it is "unknown hero" (a colourful portrait that matched nothing) or "empty or not
+  locked in" (empty slots and greyed-out heroes still being chosen).
+- It finds **your slot** because the game draws your name brighter than the other nine, and
+  checks your **side** on the map, where your team is green. If the two disagree or neither is
+  found, it gives the suggestions for both sides and says so.
+- Reading takes about 0.6 s; the first call after the server starts can take up to about 3 s.
+- Other players' names are never returned, logged or stored.
+
 ## Data sources
 
 - [OpenDota API](https://docs.opendota.com): the explorer (`public_matches`, `player_matches`,
-  `matches`), `/heroes`, `/heroes/{id}/itemPopularity` and `/constants` (items, abilities).
+  `matches`), `/heroes`, `/heroes/{id}/itemPopularity` and `/constants` (items, abilities,
+  heroes).
+- Hero portraits from Valve's CDN (the image URLs in `/constants/heroes`).
+- Your own Steam screenshots, read locally.
 
 ## Limitations
 
@@ -134,6 +168,11 @@ started from.
 - **Unknown coverage.** `public_matches` is a sample of all matches; OpenDota does not document
   its share.
 - **Patches mix.** A new patch within the 30 days blends old and new data.
+- **Screenshot reading was measured only at 1920×1080 and on Russian-language screens.** Other
+  sizes are refused. Portraits whose art differs from Valve's current images (older art,
+  personas, some cosmetics) show as "unknown hero", and heroes not yet locked in are not read.
+  Your own slot was confirmed on one screenshot per side; in Captains Mode the name and map
+  checks disagreed, so the tool gives both readings there.
 
 ## Troubleshooting
 
@@ -142,3 +181,8 @@ started from.
 - **"No matchup data".** Run `uv run dota-draft-collect` in the project folder.
 - **The collector logs timeouts.** That is expected for older slices: it splits the slice in half
   and retries. If it stops early, run it again; it continues where it stopped.
+- **`uv` says it "failed to remove file … dota-draft-server.exe".** A running server (Claude Code
+  or Claude Desktop) keeps that file open. Quit both apps, run `uv sync` once, then start them
+  again.
+- **"No reference portraits".** Run `uv run dota-draft-collect` to download them.
+- **"The newest screenshot … is N minutes old".** Press F12 again in the draft.
