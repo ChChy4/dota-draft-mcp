@@ -62,6 +62,14 @@ class OpenDotaClient:
                 time.sleep(2**attempt)
         raise OpenDotaError(error)
 
+    def explorer(self, sql: str) -> list[dict[str, Any]]:
+        """Run SQL on the OpenDota explorer and return its rows."""
+        result = self.get("/explorer", params={"sql": sql})
+        if result.get("err"):
+            error = f"explorer: {result['err']}"
+            raise QueryTimeout(error) if "timeout" in str(result["err"]).lower() else OpenDotaError(error)
+        return result["rows"]
+
     def _wait_turn(self) -> None:
         with self._lock:
             wait = self._last_request + MIN_INTERVAL_S - time.monotonic()

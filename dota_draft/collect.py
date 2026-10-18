@@ -58,11 +58,7 @@ class ExplorerSource:
         if self.requests >= self.max_requests:
             raise RequestBudgetExceeded(f"stopped after {self.requests} requests this run")
         self.requests += 1
-        result = self.client.get("/explorer", params={"sql": sql})
-        if result.get("err"):
-            error = f"explorer: {result['err']}"
-            raise QueryTimeout(error) if "timeout" in str(result["err"]).lower() else OpenDotaError(error)
-        return result["rows"]
+        return self.client.explorer(sql)
 
     def newest_match_id(self) -> int:
         rows = self._query("SELECT match_id FROM public_matches ORDER BY match_id DESC LIMIT 1")
@@ -161,6 +157,8 @@ def build_aggregate(slices: list[dict[str, Any]], built_at: float) -> dict[str, 
         "built_at": datetime.fromtimestamp(built_at, timezone.utc).isoformat(timespec="seconds"),
         "first_start": min((s["first_start"] for s in slices), default=None),
         "last_start": max((s["last_start"] for s in slices), default=None),
+        "first_match_id": min((s["lo"] for s in slices), default=None),
+        "last_match_id": max((s["hi"] for s in slices), default=None),
         "matches": sum(s["matches"] for s in slices),
         "slices": len(slices),
         "filters": MATCH_FILTER,

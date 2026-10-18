@@ -85,6 +85,8 @@ For each candidate hero **h**:
 Already-picked heroes are never suggested. Returns the top 20 with roles, score, advantage
 against each enemy, and the **real** number of games. No minimum-sample cutoff (smoothing
 handles small samples). Position is passed through for Claude, since the data has no positions.
+With enemies picked, each hero also shows its **expected win rate in this draft** = p_h + score
+(ranking stays by score).
 
 ### Tool 3 — lane info
 
@@ -93,6 +95,20 @@ For my hero against each enemy laner: real games and wins, smoothed win rate and
 minutes) from `/heroes/{hero_id}/itemPopularity`, with item IDs converted to names using
 `/constants`. The output notes that items come from pro games. If OpenDota is unreachable, the
 matchup part is still returned and the output says items are unavailable.
+
+Skill builds (added in Phase 4), from `player_matches.ability_upgrades_arr` in league (pro)
+matches via the explorer — the only matches that have skill orders:
+
+- How often each skill is taken at level 1.
+- Which basic skill is maxed first (the first non-talent skill to reach 4 points), with
+  percentages.
+- The 2–3 most common orders for levels 1–6, each with its number of games.
+- 30-day window; if the hero has fewer than 30 games, a 90-day window, said in the output; if
+  still under 30, "not enough data".
+- Marked as coming from pro matches. The description and output tell Claude to base skill advice
+  on this data and not to suggest builds from memory that the data contradicts.
+- Ability names come from `/constants/ability_ids` and `/constants/abilities`; talents
+  (`special_bonus_*`) are excluded.
 
 ## Files
 
@@ -152,9 +168,17 @@ against `/constants`. Then the collector.
   drafts in Claude.
 - Commit: "Phase 3: draft and lane tools".
 
-### Phase 4 — README and end-to-end checks
+### Phase 4 — skill builds and expected win rate
 
-- Commit: "Phase 4: README and end-to-end checks".
+Skill builds in Tool 3 and expected win rate in Tool 2, as described above.
+
+- Test: unit tests on hand-made skill orders (level 1 counts, maxed first, top orders, 30/90-day
+  fallback, "not enough data"); then real calls over stdio.
+- Commit: "Phase 4: skill builds and expected win rate".
+
+### Phase 5 — README and end-to-end checks
+
+- Commit: "Phase 5: README and end-to-end checks".
 
 ## Risks
 
@@ -171,3 +195,5 @@ against `/constants`. Then the collector.
 - **Tool 3 needs the internet** for items.
 - **Smoothing hides real outliers.** A true counter with few games ranks lower than its raw
   numbers suggest.
+- **Skill data is thin and pro-only.** In a 30-day test, all 7,431 skill orders came from league
+  matches; the median hero had 38 games and 56 of 125 heroes had under 30.

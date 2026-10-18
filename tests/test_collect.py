@@ -42,6 +42,7 @@ def test_aggregate_hero_totals_and_pairs():
 
     assert agg["matches"] == 2
     assert agg["slices"] == 2
+    assert (agg["first_match_id"], agg["last_match_id"]) == (0, 200)
     assert agg["heroes"]["1"] == {"games": 2, "wins": 1}
     assert agg["heroes"]["2"] == {"games": 2, "wins": 2}
     assert agg["heroes"]["6"] == {"games": 2, "wins": 0}

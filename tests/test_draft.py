@@ -99,7 +99,9 @@ def test_check_heroes_ok(data):
 def test_format_suggestions(data):
     text = draft.format_suggestions(data, draft.suggest(data, [], [3, 4]), [], [3, 4], 3, name, roles)
     assert "Draft suggestions for position 3 (offlane)" in text
-    assert "1. Two (roles: Carry) — score +5.00 pts | overall 60.0% in 1,000 games" in text
+    # Expected win rate in this draft = 60% overall + 5 pts score
+    assert "1. Two (roles: Carry) — score +5.00 pts | expected 65.0% in this draft | overall 60.0% in 1,000 games" in text
+    assert "2. One (roles: Carry) — score +1.25 pts | expected 51.2% in this draft" in text
     assert "vs Three +0.00 pts (0 games); vs Four +10.00 pts (50 games)" in text
     assert "2,000 Divine/Immortal ranked All Pick matches from 2026-09-10 to 2026-10-08" in text
 
@@ -143,3 +145,70 @@ def test_load_reads_file(tmp_path):
     path = tmp_path / "aggregate.json"
     path.write_text(json.dumps(AGGREGATE), encoding="utf-8")
     assert store.load(path).matches == 2000
+
+
+def test_match_id_since():
+    data = MatchupData({**AGGREGATE, "first_match_id": 1000, "last_match_id": 2000})
+    # 1000 IDs over 2,500,000 s; 10 days back from last_start plus a 10% margin.
+    expected = int(2000 - (1000 / 2_500_000) * (10 * 86400) * 1.1)
+    assert data.match_id_since(10, now=AGGREGATE["last_start"]) == expected
+    assert MatchupData(AGGREGATE).match_id_since(10, now=0) is None
+
+
+# Skill builds. Q, W, E are basic skills, R the ultimate, 900 a talent.
+SKILL_NAMES = {101: "Q", 102: "W", 103: "E", 104: "R"}
+ability = SKILL_NAMES.__getitem__
+is_talent = {900}.__contains__
+BUILD_A = [102, 103, 103, 101, 103, 104, 103, 101]  # E reaches 4 points first
+BUILD_B = [102, 103, 102, 101, 102, 104, 900, 102]  # W reaches 4 points first; the talent is skipped
+DAY = 86400
+NOW = 1_800_000_000
+
+
+def rows(build, count, days_ago):
+    return [(NOW - days_ago * DAY, build)] * count
+
+
+def test_first_maxed_skips_talents():
+    assert draft.first_maxed(BUILD_A, is_talent) == 103
+    assert draft.first_maxed(BUILD_B, is_talent) == 102
+    assert draft.first_maxed([101, 102, 103], is_talent) is None
+
+
+def test_skills_30_day_window():
+    s = draft.summarize_skills(rows(BUILD_A, 20, 1) + rows(BUILD_B, 10, 2), NOW, is_talent)
+    assert (s.days, s.games) == (30, 30)
+    assert s.level1 == [(102, 30)]
+    assert s.maxed_first == [(103, 20), (102, 10)]
+    assert s.orders == [(tuple(BUILD_A[:6]), 20), (tuple(BUILD_B[:6]), 10)]
+
+    text = "\n".join(draft.format_skills(s, ability))
+    assert "from PRO/league matches, last 30 days: 30 games" in text
+    assert draft.SKILL_RULE in text
+    assert "Level 1: W 100% (30)" in text
+    assert "Maxed first: E 67% (20), W 33% (10) (of 30 games where a basic skill reached 4 points)" in text
+    assert "- W, E, E, Q, E, R — 20 games" in text
+    assert "- W, E, W, Q, W, R — 10 games" in text
+    assert "90 days" not in text
+
+
+def test_skills_fall_back_to_90_days():
+    s = draft.summarize_skills(rows(BUILD_A, 10, 5) + rows(BUILD_B, 25, 60) + rows(BUILD_B, 5, 100), NOW, is_talent)
+    assert (s.days, s.games, s.games_in_first_window) == (90, 35, 10)  # the 100-day-old games are left out
+    text = "\n".join(draft.format_skills(s, ability))
+    assert "last 90 days: 35 games" in text
+    assert "Only 10 games in the last 30 days, so this uses the last 90 days." in text
+
+
+def test_skills_not_enough_data():
+    s = draft.summarize_skills(rows(BUILD_A, 12, 5) + rows(BUILD_B, 8, 60), NOW, is_talent)
+    assert not s.enough
+    text = "\n".join(draft.format_skills(s, ability))
+    assert "not enough data. Only 20 pro games with this hero in the last 90 days (need 30)" in text
+    assert "Level 1" not in text
+
+
+def test_format_lane_with_skills(data):
+    text = draft.format_lane(data, 1, [3], name, None, "Items: x.", ["Level 1: W 100% (30)"], "Skill data: fetched.")
+    assert "Level 1: W 100% (30)" in text and "Skill data: fetched." in text
+    assert "Skill builds unavailable." in draft.format_lane(data, 1, [3], name, None, "Items: x.")
