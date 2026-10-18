@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "dota-draft": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "dota-draft-server"]
+    }
+  }
+}
