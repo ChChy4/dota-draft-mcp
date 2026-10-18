@@ -12,3 +12,6 @@ __pycache__/
 
 # Log written by tools/install-desktop-config.ps1
 tools/install-desktop-config.log
+
+# Experiments (screenshot reading research)
+scratch/
