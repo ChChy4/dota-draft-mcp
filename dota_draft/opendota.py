@@ -31,6 +31,10 @@ class OpenDotaError(Exception):
     """Raised when OpenDota cannot be reached or returns an error."""
 
 
+class QueryTimeout(OpenDotaError):
+    """Raised when an explorer query hits the server's time limit. Retrying the same query won't help."""
+
+
 class OpenDotaClient:
     def __init__(self, base_url: str = BASE_URL, timeout_s: float = 30.0) -> None:
         self._http = httpx.Client(base_url=base_url, timeout=timeout_s)
@@ -49,6 +53,8 @@ class OpenDotaClient:
                 if response.status_code == 200:
                     return response.json()
                 error = f"{path}: HTTP {response.status_code}: {response.text[:200]}"
+                if "timeout" in response.text.lower():
+                    raise QueryTimeout(error)
                 if response.status_code not in RETRY_STATUSES:
                     raise OpenDotaError(error)
             log.warning("Attempt %d/%d failed: %s", attempt, MAX_ATTEMPTS, error)
