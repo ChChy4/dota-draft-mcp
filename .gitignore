@@ -1,0 +1,8 @@
+# Collected data (rebuilt by dota-draft-collect)
+data/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
